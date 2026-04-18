@@ -27,6 +27,7 @@ package pagealloc
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // --- mmap ---
@@ -60,6 +61,7 @@ type PageAllocator interface {
 }
 
 type pageAllocatorImpl struct {
+	mu     sync.Mutex
 	mmap   MmapFile
 	header *headerHandle
 }
@@ -113,6 +115,8 @@ func newHeaderHandle(mmap MmapFile) (headerHandle, error) {
 }
 
 func (a *pageAllocatorImpl) Close() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.mmap = nil
 	if a.header != nil {
 		a.header.close()
@@ -121,6 +125,8 @@ func (a *pageAllocatorImpl) Close() {
 }
 
 func (a *pageAllocatorImpl) Free(interval PageInterval) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if interval.IsEmpty() {
 		return nil // TODO: or error?
 	}
@@ -227,6 +233,8 @@ func (a *pageAllocatorImpl) newTrunkIter() trunkIter {
 // RecoverFreeList aligns file length to header.Pages, walks the trunk chain repairing
 // uninitialized trunk pages, and fixes LastTrunkPage in the header when it is wrong.
 func (a *pageAllocatorImpl) recover() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if err := a.syncBackingPagesToHeader(); err != nil {
 		return err
 	}
@@ -299,6 +307,8 @@ func (a *pageAllocatorImpl) syncBackingPagesToHeader() error {
 // TODO: what if program breaks between allocation and usage of page?
 // Allocate prefers the on-disk free list (trunk chain); if nothing fits, grows the file.
 func (a *pageAllocatorImpl) Allocate(pages uint64) ([]PageHandle, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if pages == 0 {
 		return nil, nil
 	}
@@ -360,7 +370,7 @@ func (a *pageAllocatorImpl) tryAllocateFromFreelist(i *trunkIter, ivLen uint64) 
 	return iv, true, nil
 }
 
-// TODO: make free/alloc concurrent
+// TODO: finer-grained or lock-free allocator paths (whole-allocator mutex serializes for now)
 
 // TODO: implement concurrent compaction alogrithm
 // 1. (inmemory) switch to compaction mode - allocations and frees operations use current header.LastTrunkId as beggining (meaning all trunks before are invisible and untouched as well as their free regions)
