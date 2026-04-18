@@ -27,9 +27,10 @@ func NewOpLog(path string) *OpLog {
 	return &OpLog{}
 }
 
-func (l *OpLog) append(op Op) error {
-	write, err := l.FileWriter.Write(op)
-	if err != nil {
-		return err
-	}
+func (l *OpLog) append(_ *Op) error {
+	// write, err := l.FileWriter.Write(op)
+	// if err != nil {
+	// return err
+	// }
+	return nil
 }
