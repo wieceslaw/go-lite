@@ -145,31 +145,6 @@ RANGE(from, to) → iterator over (k, v) | error
 
 (Границы диапазона: зафиксировать в API — `[from,to)` или `[from,to]`.)
 
-### REPLACE(k, v)
-
-```
-REPLACE(k, v) → error
-    (_, found) = GET(k)
-    if not found:
-        return ErrNotExists
-    SET(k, v)
-```
-
-### CAS(k, expected, new)
-
-```
-CAS(k, expected, new) → (ok bool) | error
-    (cur, found) = GET(k)
-    if not found && expected != emptySentinel:
-        return false, nil
-    if cur != expected:
-        return false, nil
-    SET(k, new)
-    return true, nil
-```
-
-(Семантика «пустого» ключа и сравнения значений должна совпадать с типом `Value`.)
-
 ### BEGIN(keys)
 
 ```
@@ -200,61 +175,6 @@ END(txid) → error
 
 ---
 
-## Доступные интерфейсы
-
-**KV**
-
-- `get(key)` — overlay, затем кэш страниц, затем mmap.
-- `set(key, value)` — in-memory; опционально flush в op-log.
-- `delete(key)`
-- `exists(key)`
-- `range(from, to)` — см. `RANGE` выше.
-
-**MmapedFile**
-
-- Кэш и доступ к страницам на mmap; поиск ключа по bloom + бинарный поиск в странице.
-
-### Oplog
-
-Фасад для записи, сброса на диск и поиска записей с ограничением по версии. Полный пример с интерфейсами и стандартной сборкой зависимостей: [`internal/oplog.go`](internal/oplog.go).
-
-**Абстракции**
-
-| Интерфейс | Роль |
-|-----------|------|
-| `Oplog` | `Append`, `AcquireNextVersion`, `Flush`, `CommitVersion`, `Find` — публичный контракт для KV. |
-| `OplogPersistence` | `AppendRecord`, `Sync` — куда физически пишется лог (файл, mmap, буфер в тестах). |
-| `VersionLedger` | `Allocate`, `Commit`, `Abort`, `ActiveReadVersion` — выдача версий транзакциям и видимая для чтений граница. |
-
-**Запись (`LogRecord`)**
-
-- `Key`, `Value` — как в KV; `Value == nil` — tombstone (удаление).
-- `Version` — `LogVersion` на момент операции (после `AcquireNextVersion`).
-
-**Сборка по умолчанию**
-
-```go
-log := NewOplog(NewMemoryPersistence(), NewLinearVersionLedger())
-```
-
-`NewLinearVersionLedger` — упрощённая политика (одна «водная линия» видимости, без дыр от абортов). Для продакшена `VersionLedger` заменяют реализацией с учётом пропусков версий и отложенных коммитов.
-
-**Сокращённый вид контракта**
-
-```go
-type Oplog interface {
-    Append(rec LogRecord) error
-    AcquireNextVersion() LogVersion
-    Flush() error
-    CommitVersion(v LogVersion) error
-    Find(keys []Key, atOrBefore LogVersion) (map[Key]LogRecord, error)
-}
-```
-
----
-
-### Черновые заметки по версиям
-
 ```
 v1
 tx1: acquire_tx() -> v2
@@ -275,28 +195,12 @@ v2 — committed -> oplog.version = 3? // надо находить послед
 // идемпотентность с т.з. клиента библиотеки + двухфазный клиентский коммит
 ```
 
----
+tx1:
+- k1(v2)
+- k2(v2)
+- commit -- acquires version(v4)
 
-MmapFile (working with anonymus pages of the same size without any headers)
-- get page
-- write to page
-- sync page
-- free page?
-- advice?
-
-ChunkAllocator (working with chunks of different sizes with headers)
-- get chunk handle by id
-- alloc new chunk handles by size
-- free chunk by id
-
-ChunkHandle
-- read
-- write
-- sync
-- free
-- close
-- id
-
-OpLog
-
-Db
+tx2: -- was creater later than tx1
+- k3(v1)
+- k4(v1)
+- commit -- acquires earlier version(v3)
