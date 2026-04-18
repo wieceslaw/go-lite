@@ -8,14 +8,34 @@ import (
 const (
 	headerMagic   uint64 = 0x42444554494c4f47 // ASCII "GOLITEDB"
 	headerVersion uint32 = 1
-	headerSize    int    = 40 // fixed on-disk header prefix on page 0
+)
 
+// On-disk layout of the fixed prefix at the start of page HeaderPageId (page 0).
+// Bytes beyond headerSize up to PageSize are reserved (typically zero).
+// Integer fields are little-endian.
+//
+//	offset  size   field
+//	------  ----   -----
+//	   0      8    Magic (headerMagic)
+//	   8      4    Version (headerVersion)
+//	  12      4    PageSizeConst (must equal PageSize)
+//	  16      8    Pages (total pages in file, >= 1)
+//	  24      8    FirstTrunkPage (PageId, or EmptyTrunkID)
+//	  32      8    LastTrunkPage  (PageId, or EmptyTrunkID)
+//
+//	0         8         12        16        24        32        40 = headerSize
+//	+---------+---------+---------+---------+---------+---------+
+//	| Magic   | Ver+Psz | Pages             | FirstTrunk | Last.. |
+//	+---------+---------+---------+---------+---------+---------+
+const (
 	headerOffMagic      = 0
 	headerOffVersion    = 8
 	headerOffPageSize   = 12
 	headerOffPages      = 16
 	headerOffFirstTrunk = 24
 	headerOffLastTrunk  = 32
+
+	headerSize = headerOffLastTrunk + 8
 )
 
 var (
@@ -28,6 +48,8 @@ var (
 	ErrInvalidPageSpan = errors.New("pagealloc: invalid page span")
 )
 
+// Header is the decoded database header (page 0 prefix). It implements
+// encoding.BinaryMarshaler and encoding.BinaryUnmarshaler for the headerSize-byte prefix.
 type header struct {
 	Magic          uint64
 	Version        uint32

@@ -2,7 +2,8 @@ package pagealloc
 
 import "encoding/binary"
 
-// Little-endian helpers for on-disk pagealloc layouts.
+// Little-endian helpers for on-disk layouts (Header, trunk pages, and any future records).
+// All multi-byte fields in this package use these primitives.
 
 func readU64(src []byte, off int) uint64 {
 	return binary.LittleEndian.Uint64(src[off : off+8])

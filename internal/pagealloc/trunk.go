@@ -10,11 +10,28 @@ import (
 const (
 	EmptyTrunkID PageId = PageId(math.MaxUint64)
 
-	// TrunkPageMagic identifies a free-list trunk page (distinct from headerMagic on page 0).
-	// Tools can scan page-aligned buffers for this value to recover trunk chain structure.
 	TrunkPageMagic uint64 = 0x4b525454494c4f47 // ASCII "GOLITTRK"
 
-	trunkHeaderSize   = 24 // magic(8) + next(8) + nSeg(4) + pad(4)
+	// Trunk page layout (one full PageSize per trunk; remainder after the table is zero).
+	// Fixed 24-byte header, then nSeg repetitions of PageInterval (16 bytes each).
+	// NextId links to the next trunk page; EmptyTrunkID means end of chain.
+	// Intervals are half-open [First, Last). Little-endian throughout.
+	//
+	//	 offset  size   field
+	//	 ------  ----   -----
+	//	    0      8    Magic (TrunkPageMagic)
+	//	    8      8    NextId (PageId, or EmptyTrunkID)
+	//	   16      4    nSeg (number of intervals that follow)
+	//	   20      4    pad (zero)
+	//
+	//	 trunkHeaderSize .. :  nSeg × trunkIntervalSize (each: First PageId, Last PageId)
+	//
+	//	 0         8         16        20        24 = trunkHeaderSize
+	//	 +---------+---------+---------+---------+
+	//	 | Magic   | NextId            | nSeg|pad|
+	//	 +---------+---------+---------+---------+
+	//	 | PageInterval 0 (16 bytes)             |
+	//	 | PageInterval 1                      ...
 	trunkIntervalSize = 16 // First(8) + Last(8), Last exclusive
 
 	trunkOffMagic = 0
@@ -22,7 +39,9 @@ const (
 	trunkOffNSeg  = 16
 	trunkOffPad   = 20
 
-	// trunkMaxIntervalsPerPage is how many PageInterval slots fit in one page (see encodeTrunkPage).
+	trunkHeaderSize = trunkOffPad + 4 // last field ends at byte 23 inclusive
+
+	// how many PageInterval slots fit in one page
 	trunkMaxIntervalsPerPage = (PageSize - trunkHeaderSize) / trunkIntervalSize
 )
 
@@ -39,7 +58,7 @@ type trunk struct {
 	Intervals []PageInterval
 }
 
-func emptyTrunkData(id PageId) trunk {
+func emptyTrunkData() trunk {
 	return trunk{
 		NextId:    EmptyTrunkID,
 		Intervals: nil,
@@ -146,6 +165,26 @@ func mergeAdjacentSorted(ivs []PageInterval) []PageInterval {
 	}
 	out = append(out, cur)
 	return out
+}
+
+func (tr trunk) acquireInterval(n uint64) (PageInterval, trunk, bool) {
+	if n == 0 {
+		return PageInterval{}, tr, false
+	}
+	for i, iv := range tr.Intervals {
+		acquired, rem, ok := iv.SplitBySize(n)
+		if !ok {
+			continue
+		}
+		out := make([]PageInterval, 0, len(tr.Intervals))
+		out = append(out, tr.Intervals[:i]...)
+		if !rem.IsEmpty() {
+			out = append(out, rem)
+		}
+		out = append(out, tr.Intervals[i+1:]...)
+		return acquired, trunk{NextId: tr.NextId, Intervals: out}, true
+	}
+	return PageInterval{}, tr, false
 }
 
 // --- iterator ---

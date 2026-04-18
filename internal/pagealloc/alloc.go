@@ -1,3 +1,27 @@
+// Package pagealloc implements a page-granular allocator over a growable file.
+//
+// # File layout
+//
+// The backing store is a sequence of fixed-size pages (see PageSize). Logical
+// page index i starts at byte offset i * PageSize. All multi-byte integers on
+// disk are little-endian (see le.go).
+//
+// A minimal database uses at least page 0:
+//
+//	page 0 (HeaderPageId): database header prefix, then zero padding to PageSize
+//	page 1..N-1:           user data and/or free-list trunk pages
+//
+// The header records total page count and the first/last page IDs of the
+// singly linked list of trunk pages that store free PageIntervals. An empty
+// free list uses EmptyTrunkID for both trunk pointers. See header.go and
+// trunk.go for exact byte layouts.
+//
+//	+---------+---------+---------+-----+
+//	| page 0  | page 1  | page 2  | ... |
+//	| header  | data /  | trunk /     |
+//	| + pad   | trunk   | data        |
+//	+---------+---------+---------+-----+
+
 package pagealloc
 
 import (
@@ -10,7 +34,9 @@ import (
 type MmapFile interface {
 	// LoadPage guarantees the page is available for read/write (may be cached).
 	LoadPage(id PageId) (PageHandle, error)
+	LoadPages(iv PageInterval) ([]PageHandle, error)
 	Resize(pages uint64) error
+	Expand(pages uint64) (PageInterval, error) // returns allocated interval
 	FilePages() (uint64, error)
 }
 
@@ -245,7 +271,7 @@ func (a *pageAllocatorImpl) recoverTrunkStep(i *trunkIter, seen map[PageId]struc
 	seen[cur] = struct{}{}
 
 	if err != nil && errors.Is(err, ErrTrunkBadPage) {
-		th.data = emptyTrunkData(cur)
+		th.data = emptyTrunkData()
 		if err := th.sync(); err != nil {
 			return 0, err
 		}
@@ -270,8 +296,83 @@ func (a *pageAllocatorImpl) syncBackingPagesToHeader() error {
 	return nil
 }
 
-// TODO: differentiate capacity and size of pages in allocator
-// TODO: Implement cuncurrent compaction
-func (a *pageAllocatorImpl) Allocate(count uint64) ([]PageHandle, error) {
-	return nil, errors.New("pagealloc: allocation not implemented")
+// TODO: what if program breaks between allocation and usage of page?
+// Allocate prefers the on-disk free list (trunk chain); if nothing fits, grows the file.
+func (a *pageAllocatorImpl) Allocate(pages uint64) ([]PageHandle, error) {
+	if pages == 0 {
+		return nil, nil
+	}
+
+	// TODO: change iter start ptr later for available tail (when compaction is implemented)
+	i := a.newTrunkIter()
+	var piv PageInterval
+	for i.hasNext() {
+		iv, ok, err := a.tryAllocateFromFreelist(&i, pages)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			piv = iv
+			break
+		}
+	}
+
+	if piv.IsEmpty() {
+		iv, err := a.allocateByExpanding(pages)
+		if err != nil {
+			return nil, err
+		}
+		piv = iv
+	}
+
+	return a.mmap.LoadPages(piv)
 }
+
+func (a *pageAllocatorImpl) allocateByExpanding(pages uint64) (PageInterval, error) {
+	iv, err := a.mmap.Expand(pages)
+	if err != nil {
+		return EmptyInterval, err
+	}
+
+	a.header.data.Pages += iv.Length()
+	if err := a.header.sync(); err != nil {
+		return EmptyInterval, err
+	}
+	return iv, nil
+}
+
+func (a *pageAllocatorImpl) tryAllocateFromFreelist(i *trunkIter, ivLen uint64) (PageInterval, bool, error) {
+	th, err := i.next()
+	defer th.close()
+	if err != nil {
+		return EmptyInterval, false, err
+	}
+
+	iv, newTr, ok := th.data.acquireInterval(ivLen)
+	if !ok {
+		return EmptyInterval, false, nil
+	}
+
+	th.data = newTr
+	if err := th.sync(); err != nil {
+		return EmptyInterval, false, err
+	}
+	return iv, true, nil
+}
+
+// TODO: make free/alloc concurrent
+
+// TODO: implement concurrent compaction alogrithm
+// 1. (inmemory) switch to compaction mode - allocations and frees operations use current header.LastTrunkId as beggining (meaning all trunks before are invisible and untouched as well as their free regions)
+// 		if crash happens here it won't mean anyting beacause we simply didn't use some of free space and didn't change file contents
+// 2. (inmemory) compute new trunk layout - take all trunk pages (except last before switching) and their free pages, merge and sort them into new layout, with new trunks
+//		if crash happens here it won't mean anyting beacause we didn't change current file layout
+// 3. (in file) find space (preferably in current trunk freespace) and start putting there new layout (with last trunk pointing to old "last trunk" from p.1)
+//		if crash happens here it won't mean anyting if we used current free space
+// 4. (in file) atomically (under inmemory header lock) change start index in header
+// 		chash can't happend in-between file sync
+// 5. (inmemory) remove header lock, switch mode from compaction to default
+
+// TODO: differentiate capacity and size of pages in allocator
+
+// TODO: write tests that all handles are cleared

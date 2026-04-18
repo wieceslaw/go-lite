@@ -72,6 +72,66 @@ func TestMergeItervals(t *testing.T) {
 	}
 }
 
+func TestTrunk_acquireInterval(t *testing.T) {
+	t.Parallel()
+	t.Run("exact_fit_removes_interval", func(t *testing.T) {
+		t.Parallel()
+		tr := trunk{NextId: 7, Intervals: []PageInterval{{10, 13}}}
+		iv, got, ok := tr.acquireInterval(3)
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		wantIv := PageInterval{First: 10, Last: 13}
+		if iv != wantIv {
+			t.Fatalf("acquired %v, want %v", iv, wantIv)
+		}
+		wantTr := trunk{NextId: 7, Intervals: nil}
+		if got.NextId != wantTr.NextId || !slices.Equal(got.Intervals, wantTr.Intervals) {
+			t.Fatalf("trunk %+v, want %+v", got, wantTr)
+		}
+	})
+
+	t.Run("split_leaves_remainder", func(t *testing.T) {
+		t.Parallel()
+		tr := trunk{Intervals: []PageInterval{{10, 20}}}
+		iv, got, ok := tr.acquireInterval(3)
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if iv != (PageInterval{First: 10, Last: 13}) {
+			t.Fatalf("iv %v", iv)
+		}
+		want := []PageInterval{{13, 20}}
+		if !slices.Equal(got.Intervals, want) {
+			t.Fatalf("intervals %+v, want %+v", got.Intervals, want)
+		}
+	})
+
+	t.Run("first_fit_in_list_order", func(t *testing.T) {
+		t.Parallel()
+		tr := trunk{Intervals: []PageInterval{{1, 2}, {5, 10}}}
+		iv, got, ok := tr.acquireInterval(4)
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if iv.First != 5 || iv.Last != 9 {
+			t.Fatalf("iv %v", iv)
+		}
+		if !slices.Equal(got.Intervals, []PageInterval{{1, 2}, {9, 10}}) {
+			t.Fatalf("got %+v", got.Intervals)
+		}
+	})
+
+	t.Run("too_small", func(t *testing.T) {
+		t.Parallel()
+		tr := trunk{Intervals: []PageInterval{{1, 2}}}
+		_, _, ok := tr.acquireInterval(2)
+		if ok {
+			t.Fatal("expected not ok")
+		}
+	})
+}
+
 func TestMergeIntoTrunkIfFits(t *testing.T) {
 	t.Parallel()
 	t.Run("fits_simple", func(t *testing.T) {
@@ -203,7 +263,7 @@ func TestDecodeTrunkPage_errors(t *testing.T) {
 
 func TestEmptyTrunkData_encodeDecode(t *testing.T) {
 	t.Parallel()
-	td := emptyTrunkData(5)
+	td := emptyTrunkData()
 	buf := make([]byte, PageSize)
 	if err := encodeTrunkPage(td, buf); err != nil {
 		t.Fatal(err)
@@ -238,10 +298,41 @@ func (m *trunkTestMmap) LoadPage(id PageId) (PageHandle, error) {
 	return &trunkTestHandle{id: id, buf: m.pages[id]}, nil
 }
 
+func (m *trunkTestMmap) LoadPages(iv PageInterval) ([]PageHandle, error) {
+	n := iv.Length()
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]PageHandle, 0, n)
+	for id := iv.First; id < iv.Last; id++ {
+		ph, err := m.LoadPage(id)
+		if err != nil {
+			for _, h := range out {
+				h.Close()
+			}
+			return nil, err
+		}
+		out = append(out, ph)
+	}
+	return out, nil
+}
+
 func (m *trunkTestMmap) Resize(uint64) error { return nil }
 
 func (m *trunkTestMmap) FilePages() (uint64, error) {
 	return uint64(len(m.pages)), nil
+}
+
+func (m *trunkTestMmap) Expand(pages uint64) (PageInterval, error) {
+	if pages == 0 {
+		return PageInterval{}, nil
+	}
+	cur := uint64(len(m.pages))
+	first := PageId(cur)
+	for uint64(len(m.pages)) < cur+pages {
+		m.pages = append(m.pages, make([]byte, PageSize))
+	}
+	return PageInterval{First: first, Last: first + PageId(pages)}, nil
 }
 
 type trunkTestHandle struct {

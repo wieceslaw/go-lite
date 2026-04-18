@@ -35,6 +35,22 @@ func (p *PageFile) FilePages() (uint64, error) {
 	return (uint64(sz) + pagealloc.PageSize - 1) / pagealloc.PageSize, nil
 }
 
+// Expand grows the backing file by pages and returns the newly added half-open page interval.
+func (p *PageFile) Expand(pages uint64) (pagealloc.PageInterval, error) {
+	if pages == 0 {
+		return pagealloc.PageInterval{}, nil
+	}
+	cur, err := p.FilePages()
+	if err != nil {
+		return pagealloc.PageInterval{}, err
+	}
+	first := pagealloc.PageId(cur)
+	if err := p.Resize(cur + pages); err != nil {
+		return pagealloc.PageInterval{}, err
+	}
+	return pagealloc.PageInterval{First: first, Last: first + pagealloc.PageId(pages)}, nil
+}
+
 func (p *PageFile) LoadPage(id pagealloc.PageId) (pagealloc.PageHandle, error) {
 	off := int64(id) * int64(pagealloc.PageSize)
 	buf := make([]byte, pagealloc.PageSize)
@@ -48,6 +64,25 @@ func (p *PageFile) LoadPage(id pagealloc.PageId) (pagealloc.PageHandle, error) {
 		}
 	}
 	return &pageFileHandle{f: p.f, id: id, off: off, data: buf}, nil
+}
+
+func (p *PageFile) LoadPages(iv pagealloc.PageInterval) ([]pagealloc.PageHandle, error) {
+	n := iv.Length()
+	if n == 0 {
+		return nil, nil
+	}
+	out := make([]pagealloc.PageHandle, 0, n)
+	for id := iv.First; id < iv.Last; id++ {
+		ph, err := p.LoadPage(id)
+		if err != nil {
+			for _, h := range out {
+				h.Close()
+			}
+			return nil, err
+		}
+		out = append(out, ph)
+	}
+	return out, nil
 }
 
 type pageFileHandle struct {
